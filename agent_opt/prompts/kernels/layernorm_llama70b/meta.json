@@ -1,0 +1,14 @@
+{
+  "entry_point": "layernorm",
+  "dtype": "bfloat16",
+  "input_names": ["x"],
+  "shape_args": {
+    "m": 128,
+    "n": 8192,
+    "TILES_IN_BLOCK_M": 1,
+    "TILES_IN_BLOCK_N": 4
+  },
+  "rtol": 0.02,
+  "atol": 0.02,
+  "refs": "kernels/layernorm/refs.py"
+}

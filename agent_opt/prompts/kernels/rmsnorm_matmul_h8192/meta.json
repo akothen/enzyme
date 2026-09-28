@@ -1,0 +1,16 @@
+{
+  "entry_point": "rmsnorm_matmul",
+  "dtype": "bfloat16",
+  "input_names": ["x", "w"],
+  "shape_args": {
+    "m": 1024,
+    "n": 8192,
+    "k": 8192,
+    "TILES_IN_BLOCK_M": 8,
+    "TILES_IN_BLOCK_N": 4,
+    "TILES_IN_BLOCK_K": 8
+  },
+  "rtol": 0.05,
+  "atol": 0.1,
+  "refs": "kernels/rmsnorm_matmul/refs.py"
+}

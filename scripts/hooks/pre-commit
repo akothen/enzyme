@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Fast gate, on every commit: format and lint the staged Python files, then run
+# the pure-logic test subset. Target is a couple of seconds, so it stays a habit
+# rather than something to skip.
+#
+# Enable with `make hooks` (sets core.hooksPath). `git commit --no-verify` skips
+# it, and a hook only exists in the clone that enabled it — the full suite runs
+# on push, and neither is a substitute for a server-side check.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Staged Python files only, so hook time does not grow with the repo. ACM skips
+# deletions and renames-without-content.
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+
+if ((${#staged[@]} > 0)); then
+    echo "pre-commit: ruff on ${#staged[@]} staged file(s)"
+    # Report, never rewrite: a hook that reformats behind you produces a commit
+    # whose content you never read. `make format` is the fix.
+    if ! make -s --no-print-directory _hook-ruff FILES="${staged[*]}"; then
+        echo
+        echo "pre-commit: FAILED. Run 'make format' and re-stage, or 'git commit --no-verify' to bypass."
+        exit 1
+    fi
+fi
+
+echo "pre-commit: fast tests"
+if ! make -s --no-print-directory test-fast; then
+    echo
+    echo "pre-commit: FAILED. Fix the tests, or 'git commit --no-verify' to bypass."
+    exit 1
+fi

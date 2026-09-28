@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "axon"
+version = "0.1.0"
+description = "Synthesis-based compiler for Trainium"
+readme = "README.md"
+requires-python = "==3.11.*"
+dependencies = [
+    "egglog>=13.2.0",
+    "neuronx-cc==2.*",
+    "nki>=0.3.0",
+    "nkipy",
+    "numpy>=1.26.4",
+    "pandas>=3.0.3",
+    "spike",
+    "torch-neuronx>=2.9.0.2.13.26312",
+    "torchvision>=0.24.1",
+    "tqdm>=4.67.3",
+    "z3-solver>=4.16.0.0",
+]
+
+[project.scripts]
+axon = "axon.cli:main"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+url = "https://pip.repos.neuron.amazonaws.com/"
+
+[tool.uv.sources]
+nkipy = { git = "https://github.com/aws-neuron/nkipy", subdirectory = "nkipy" }
+spike = { git = "https://github.com/aws-neuron/nkipy", subdirectory = "spike" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/axon"]
+
+[project.optional-dependencies]
+agent = [
+    "anthropic>=0.102.0",
+]
+
+[dependency-groups]
+# Gate tools are pinned exactly, not floated. `ruff>=0.15.13` is not a gate: ruff
+# 0.16 widened its default rule set, which reports 197 findings on this tree
+# against 2 at the pinned version, so an unrelated release would break every
+# commit. Bump these deliberately, with the findings they introduce fixed in the
+# same commit.
+dev = [
+    "basedpyright==1.40.1",
+    "pytest>=9.0.3",
+    "pytest-xdist>=3.8.0",
+    "ruff==0.15.13",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["out", "artifacts_nki", "artifacts_baseline"]
+# Run the suite in parallel by default (pytest-xdist). "auto" uses all cores;
+# override with "-n0" for a serial run when debugging a single test.
+addopts = '-n auto -m "not slow and not device"'
+markers = [
+    "slow: runs production synthesis, search, simulation, or broad sweeps",
+    "device: needs a Trainium device (compile, bench, or NRT). Deselected by default; run with `make test-device` on a Trainium host.",
+]
+
+[tool.ruff]
+target-version = "py311"
+src = ["src", "kernels"]
+# `winners/` holds generated deliverables (tools/specialize_winner.py). They are
+# byte-faithful to what codegen emitted, apart from the specialized signature, so
+# linting them would mean editing generated code and losing that guarantee. The
+# emitter's unused `import numpy as np` shows up here only because these files are
+# tracked, unlike their `out/` originals; fix it in codegen, not in the artifact.
+extend-exclude = [
+    "winners",
+    # Versioned Axon-winner snapshots used as fixed agent experiment inputs.
+    # Edit the generator/winner and reseed instead of mutating these in place.
+    "agent_opt/prompts/kernels",
+]
+# Ruff ignores excludes for paths named explicitly on the command line. Without
+# this, `ruff check winners/` (or a hook that passes file paths) would still lint
+# the generated kernels.
+force-exclude = true
+
+[tool.ruff.lint]
+extend-select = [
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "C4",  # flake8-comprehensions
+]

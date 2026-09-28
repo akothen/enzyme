@@ -1,0 +1,25 @@
+{
+  "entry_point": "qkv_cte",
+  "dtype": "bfloat16",
+  "input_names": [
+    "x",
+    "mlp_prev",
+    "attention_prev",
+    "w"
+  ],
+  "shape_args": {
+    "m": 1024,
+    "n": 512,
+    "k": 16384,
+    "TILES_IN_BLOCK_M": 2,
+    "TILES_IN_BLOCK_N": 1,
+    "TILES_IN_BLOCK_K": 16
+  },
+  "rtol": 0.05,
+  "atol": 0.15,
+  "refs": "kernels/qkv_cte/refs.py",
+  "nkilib": {
+    "test": "test/integration/nkilib/core/qkv/test_qkv_cte.py",
+    "selector": "test_qkv_cte_performance_bsd_unit and vnc_degree-1 and batch-1 and seqlen-1024 and hidden_dim-16384 and fused_qkv_dim-512 and norm_type-1 and fused_add-1"
+  }
+}

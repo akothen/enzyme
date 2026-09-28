@@ -1,0 +1,25 @@
+{
+  "entry_point": "fused_adam",
+  "dtype": "bfloat16",
+  "input_names": [
+    "param",
+    "grad",
+    "exp_avg",
+    "exp_avg_sq",
+    "step_size",
+    "inv_bc2_sqrt",
+    "wd"
+  ],
+  "shape_args": {
+    "p": 128,
+    "f": 8192,
+    "TILES_IN_BLOCK_M": 1,
+    "TILES_IN_BLOCK_N": 8
+  },
+  "rtol": 0.01,
+  "atol": 0.01,
+  "refs": "kernels/fused_adam/refs.py",
+  "nkilib": {
+    "test": "test/integration/nkilib/experimental/optimizer/test_fused_adam.py"
+  }
+}

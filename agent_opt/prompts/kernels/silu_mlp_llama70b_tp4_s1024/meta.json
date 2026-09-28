@@ -1,0 +1,23 @@
+{
+  "entry_point": "silu_mlp",
+  "dtype": "bfloat16",
+  "input_names": [
+    "x",
+    "w1",
+    "w2",
+    "w3"
+  ],
+  "shape_args": {
+    "m": 1024,
+    "n": 7168,
+    "k": 8192,
+    "p": 8192,
+    "TILES_IN_BLOCK_M": 2,
+    "TILES_IN_BLOCK_N": 8,
+    "TILES_IN_BLOCK_K": 4,
+    "TILES_IN_BLOCK_P": 2
+  },
+  "rtol": 0.05,
+  "atol": 0.1,
+  "refs": "kernels/silu_mlp/refs.py"
+}

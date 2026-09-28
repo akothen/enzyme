@@ -1,0 +1,17 @@
+{
+  "entry_point": "softmax_mm",
+  "dtype": "bfloat16",
+  "input_names": ["x", "w"],
+  "shape_args": {
+    "m": 1024,
+    "n": 28672,
+    "k": 8192,
+    "TILES_IN_BLOCK_M": 2,
+    "TILES_IN_BLOCK_N": 8,
+    "TILES_IN_BLOCK_K": 4
+  },
+  "rtol": 0.05,
+  "atol": 0.1,
+  "refs": "kernels/softmax_mm/refs.py",
+  "baseline_note": "Harvested (early) Axon winner softmax_mm n28672 [1024,28672,8192]: hw_variant=3, tile_variant=1, TILES(M,N,K)=(2,8,4); median 6.73 ms at lnc=1. Synth was stopped early (14 modules / 1040 timed rows searched) to free the device; this is the best-so-far, not the full-search winner."
+}

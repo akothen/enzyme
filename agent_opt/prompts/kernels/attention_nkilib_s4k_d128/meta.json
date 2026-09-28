@@ -1,0 +1,20 @@
+{
+  "entry_point": "attention_nkilib",
+  "dtype": "bfloat16",
+  "input_names": ["q", "k_t", "v"],
+  "shape_args": {
+    "s": 4096,
+    "d": 128,
+    "TILES_IN_BLOCK_M": 4,
+    "TILES_IN_BLOCK_N": 16,
+    "TILES_IN_BLOCK_K": 1,
+    "TILES_IN_BLOCK_P": 1
+  },
+  "rtol": 0.05,
+  "atol": 0.05,
+  "refs": "kernels/attention_nkilib/refs.py",
+  "nkilib": {
+    "test": "test/integration/nkilib/core/attention/test_attention_cte.py",
+    "selector": "b-1_skv-4096_sq-4096_d-128_sc-1.0_dtype-bfloat16_cm-0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "entry_point": "rope",
+  "dtype": "bfloat16",
+  "input_names": ["x_even", "x_odd", "cos", "sin"],
+  "shape_args": {
+    "half_d": 128,
+    "free": 32768,
+    "TILES_IN_BLOCK_M": 1,
+    "TILES_IN_BLOCK_N": 2
+  },
+  "rtol": 0.0078125,
+  "atol": 0.02,
+  "refs": "kernels/rope/refs.py"
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Full gate, on every push: exactly what `make ci` checks — format, lint, and the
+# whole host test suite (807 tests, about 100 s here, 2.5 min on two cores).
+#
+# This is the last automated check before the code reaches the remote, because
+# the repo has no server-side CI. `git push --no-verify` skips it.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-push: make ci"
+if ! make --no-print-directory ci; then
+    echo
+    echo "pre-push: FAILED. Fix it, or 'git push --no-verify' to bypass (and say so in the PR)."
+    exit 1
+fi

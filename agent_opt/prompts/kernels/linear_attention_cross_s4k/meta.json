@@ -1,0 +1,18 @@
+{
+  "entry_point": "linear_attention",
+  "dtype": "bfloat16",
+  "input_names": ["q", "key", "v"],
+  "shape_args": {
+    "sq": 4096,
+    "sk": 4096,
+    "dk": 128,
+    "dv": 512,
+    "TILES_IN_BLOCK_M": 4,
+    "TILES_IN_BLOCK_N": 1,
+    "TILES_IN_BLOCK_K": 8,
+    "TILES_IN_BLOCK_P": 1
+  },
+  "rtol": 0.05,
+  "atol": 0.05,
+  "refs": "kernels/linear_attention/refs.py"
+}

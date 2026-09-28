@@ -1,0 +1,14 @@
+{
+  "include": ["src", "kernels"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportArgumentType": "none",
+  "reportReturnType": "none",
+  "reportAssignmentType": "none",
+  "reportOperatorIssue": "none",
+  "reportCallIssue": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportConstantRedefinition": "none",
+  "reportInvalidTypeForm": "none",
+  "reportMissingTypeArgument": "none"
+}

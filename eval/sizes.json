@@ -1,0 +1,105 @@
+{
+  "_comment": {
+    "schema": "<kernel>: { <case_id>: {sizes: [...], dtype?: str, lnc?: int, rtol?: float, atol?: float} }",
+    "sizes": "Required. Integers in the spec's dim_vars order (the same order --sizes binds positionally).",
+    "dtype": "Optional. Passed through as --dtype. Omit to use the spec's make_inputs default. Only present where a case differs from that default (e.g. a same-shape dtype twin).",
+    "lnc": "Optional. 2 opts the case into the lnc=2 sharding search (search + emit + bench each codegen-emittable sharding head-to-head against the lnc=1 winner). Absent => lnc=1, today's single-core path.",
+    "rtol_atol": "Optional. PRESENCE of rtol/atol marks a head-to-head case: it gets a generated per-case nkilib harness (out/winners/<stem>_case.py). A bench-only case omits them. Adding a head-to-head case also requires the spec's baseline_op + torch_ref.",
+    "readers": "Skip any key beginning with '_' (this comment) at both the kernel and case levels."
+  },
+
+  "mul": {
+    "bw_1k": {"sizes": [1024, 1024], "rtol": 1e-2, "atol": 1e-2},
+    "bw_4k": {"sizes": [4096, 4096], "rtol": 1e-2, "atol": 1e-2}
+  },
+
+  "cumsum": {
+    "fast_small":      {"sizes": [1024, 1024], "rtol": 1e-3, "atol": 1e-3},
+    "fast_small_bf16": {"sizes": [1024, 1024], "dtype": "bfloat16", "rtol": 1e-2, "atol": 1e-2},
+    "nucleus":         {"sizes": [128, 32768], "rtol": 1e-3, "atol": 1e-3},
+    "fast_large":      {"sizes": [4096, 4096], "rtol": 1e-3, "atol": 1e-3},
+    "llama3_vocab":    {"sizes": [128, 128256], "rtol": 1e-3, "atol": 1e-3},
+    "qwen_vocab":      {"sizes": [128, 151936], "rtol": 1e-3, "atol": 1e-3}
+  },
+
+  "rmsnorm": {
+    "h1024": {"sizes": [1024, 1024], "rtol": 1e-2, "atol": 1e-2},
+    "h4096": {"sizes": [1024, 4096], "rtol": 1e-2, "atol": 1e-2},
+    "h8192": {"sizes": [128, 8192], "rtol": 1e-2, "atol": 1e-2},
+    "h8192_l2": {"sizes": [128, 8192], "lnc": 2, "rtol": 1e-2, "atol": 1e-2}
+  },
+
+  "layernorm": {
+    "llama70b": {"sizes": [128, 8192], "rtol": 2e-2, "atol": 2e-2},
+    "qwen32b":  {"sizes": [128, 5120], "rtol": 2e-2, "atol": 2e-2}
+  },
+
+  "rope": {
+    "llama3_8b": {"sizes": [128, 4096], "rtol": 7.8125e-3, "atol": 2e-2},
+    "gqa_long":  {"sizes": [128, 32768], "rtol": 7.8125e-3, "atol": 2e-2}
+  },
+
+  "fused_adam": {
+    "opt_1m":      {"sizes": [128, 8192], "rtol": 1e-2, "atol": 1e-2},
+    "opt_1m_fp32": {"sizes": [128, 8192], "dtype": "float32", "rtol": 1e-4, "atol": 1e-4}
+  },
+
+  "qkv_cte": {
+    "llama405b_1k": {"sizes": [1024, 512, 16384], "rtol": 5e-2, "atol": 1.5e-1},
+    "llama405b_8k": {"sizes": [8192, 512, 16384], "rtol": 5e-2, "atol": 1.5e-1},
+    "llama70b":     {"sizes": [16384, 512, 8192], "rtol": 5e-2, "atol": 1.5e-1},
+    "llama70b_l2":  {"sizes": [16384, 512, 8192], "lnc": 2, "rtol": 5e-2, "atol": 1.5e-1},
+    "mistral123b":  {"sizes": [16384, 640, 12288], "rtol": 5e-2, "atol": 1.5e-1},
+    "vision_l4":    {"sizes": [578, 264, 1408], "rtol": 5e-2, "atol": 1.5e-1},
+    "llama405b_1k_fp32": {"sizes": [1024, 512, 16384], "dtype": "float32", "rtol": 1e-3, "atol": 1e-3},
+    "llama405b_8k_fp32": {"sizes": [8192, 512, 16384], "dtype": "float32", "rtol": 1e-3, "atol": 1e-3},
+    "llama70b_fp32":     {"sizes": [16384, 512, 8192], "dtype": "float32", "rtol": 1e-3, "atol": 1e-3},
+    "mistral123b_fp32":  {"sizes": [16384, 640, 12288], "dtype": "float32", "rtol": 1e-3, "atol": 1e-3},
+    "vision_l4_fp32":    {"sizes": [578, 264, 1408], "dtype": "float32", "rtol": 1e-3, "atol": 1e-3}
+  },
+
+  "attention": {
+    "sq1k": {"sizes": [1024, 1024, 1024], "rtol": 2e-2, "atol": 2e-2},
+    "d512": {"sizes": [1024, 512, 1024], "rtol": 2e-2, "atol": 2e-2},
+    "s4k_d512": {"sizes": [4096, 512, 4096], "rtol": 2e-2, "atol": 2e-2},
+    "s8k_d512": {"sizes": [8192, 512, 8192], "rtol": 2e-2, "atol": 2e-2}
+  },
+
+  "_attention_nkilib_tolerance": "atol/rtol are 5e-2 (not the 2e-2 the other attention cases use) because bf16 exp error, not codegen, dominates the check: the softmax has no row-max subtraction, so the emitted kernel simulates to ~1e-6 against the fp32 reference and the gap is intrinsic bf16-vs-fp32 precision. Cases run at d=128, nkilib attention_cte's mainstream head dim (Llama3-70B / Qwen3 / Gemma3 configs use d=64/128), unscaled (softmax_scale=1.0), which puts max(q @ k_t) at ~44, safely under the fp32 exp limit of 88.72. At d=128 num_d_tiles=1, so attention_cte's flash threshold stays at 10240 and the hand side runs full-scores (non-flash) through s=8192, the same algorithm the Axon kernel uses, so the comparison is apples-to-apples on both count and algorithm. d=512 was retired: it is the kernel's max head dim (Gemma4-global only) and its flash threshold collapses to 10240/num_d_tiles=2560, so the hand side switched to sectioned flash at s>=4k while Axon stayed full-scores, an apples-to-oranges comparison.",
+  "attention_nkilib": {
+    "d128": {"sizes": [1024, 128], "rtol": 5e-2, "atol": 5e-2},
+    "s2k_d128": {"sizes": [2048, 128], "rtol": 5e-2, "atol": 5e-2},
+    "s4k_d128": {"sizes": [4096, 128], "rtol": 5e-2, "atol": 5e-2},
+    "s8k_d128": {"sizes": [8192, 128], "rtol": 5e-2, "atol": 5e-2}
+  },
+  "linear_attention": {
+    "_note": "Cross-attention linear attention out = Q(KᵀV); dim order sq, sk, dk, dv. Distinct sq/sk and dk/dv keep the four schedule roles distinct (m=sq, n=dv, p=dk, k=sk). Bare matmul→matmul chain (no combine between the matmuls). dv (the n/wide role) is 512 (= tile_n) so it tiles without the wide clamp; dv<512 is a known tiling-resolution gap for this dim structure (the wide role's raw dim has no derivable extent, so _resolve_tiles skips it).",
+    "cross_s1k": {"sizes": [1024, 1024, 128, 512], "rtol": 5e-2, "atol": 5e-2},
+    "cross_s4k": {"sizes": [4096, 4096, 128, 512], "rtol": 5e-2, "atol": 5e-2}
+  },
+  "broadcast_row_bias_add": {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "matmul": {
+    "sq1k":      {"sizes": [1024, 1024, 1024]},
+    "ck_16k_l2": {"sizes": [1024, 1024, 16384], "dtype": "float32", "lnc": 2, "rtol": 1e-3, "atol": 1e-3},
+    "pm_16k_l2": {"sizes": [16384, 1024, 1024], "lnc": 2, "rtol": 2e-2, "atol": 2e-2}
+  },
+  "matmul_red_div":         {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "matmul_red_mul":         {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "matmul_transpose":       {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "part_relu_mlp":          {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "part_silu_mlp":          {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "reduce_broadcast_mul":   {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "reduce_mul_broadcast":   {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "relu_matmul":            {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "rmsnorm_matmul":         {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "silu_matmul":            {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "softmax_mm":             {"sq1k": {"sizes": [1024, 1024, 1024]}},
+  "transpose_matmul":       {"sq1k": {"sizes": [1024, 1024, 1024]}},
+
+  "relu_mlp": {"sq1k": {"sizes": [1024, 1024, 1024, 1024]}},
+  "silu_mlp": {"sq1k": {"sizes": [1024, 1024, 1024, 1024]}},
+
+  "relu":    {"sq1k": {"sizes": [1024, 1024]}},
+  "silu":    {"sq1k": {"sizes": [1024, 1024]}},
+  "softmax": {"sq1k": {"sizes": [1024, 1024]}}
+}

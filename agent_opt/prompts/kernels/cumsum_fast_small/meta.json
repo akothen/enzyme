@@ -1,0 +1,16 @@
+{
+  "entry_point": "cumsum",
+  "dtype": "float32",
+  "input_names": ["x"],
+  "shape_args": {
+    "m": 1024,
+    "n": 1024
+  },
+  "rtol": 0.001,
+  "atol": 0.001,
+  "refs": "kernels/cumsum/refs.py",
+  "nkilib": {
+    "test": "test/integration/nkilib/core/cumsum/test_cumsum.py",
+    "selector": "axon_hh_1024_1024"
+  }
+}
