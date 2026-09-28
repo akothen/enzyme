@@ -1036,6 +1036,18 @@ def _build_parser() -> argparse.ArgumentParser:
             f"--rtol. Omit for a bench-only run (default atol={_DEFAULT_ATOL})."
         ),
     )
+    parser.add_argument(
+        "--trace-rewrites",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Print every rewrite the e-graph admits (propagation, fusion, "
+            "lowering) as the matched graph and the new graph. With PATH, append "
+            "to that file instead of stderr. Same as AXON_TRACE_REWRITES."
+        ),
+    )
     return parser
 
 
@@ -1128,6 +1140,10 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    if args.trace_rewrites is not None:
+        from axon.egraph.rewrite_trace import enable_from_cli
+
+        enable_from_cli(args.trace_rewrites or None)
     sys.exit(_run(args))
 
 

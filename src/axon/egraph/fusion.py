@@ -43,6 +43,7 @@ from axon.egraph.propagation import (
     eligible_occurrences,
     occurrence_identity,
 )
+from axon.egraph.rewrite_trace import record_term_rewrite
 from axon.egraph.workers import resolve_worker_count
 from axon.isa_semantics import (
     _NODE_IDS,
@@ -297,9 +298,17 @@ def _admit_fusion_batch(
         roots.append((item, root_handle, target_handle))
 
     equalities_added = 0
-    for _item, root_handle, target_handle in roots:
+    for item, root_handle, target_handle in roots:
         unioned = adapter.union_if_distinct(root_handle, target_handle)
         equalities_added += int(unioned)
+        if unioned:
+            record_term_rewrite(
+                _FUSION_STAGE,
+                context,
+                item.target_class,
+                TermRef(item.target_class),
+                item.candidate,
+            )
     after = adapter.freeze_snapshot()
     after_rows = sum(len(rows) for rows in after.classes.values())
     return max(0, after_rows - before_rows), equalities_added

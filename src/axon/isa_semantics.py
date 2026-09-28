@@ -306,6 +306,32 @@ SCAN2_FAM = register_fold_family(
     combine_op="add",
     takes_extent=False,
 )
+# Non-additive rank-1 reductions. Extensionality (equal steps give equal folds)
+# holds for any combine op, so a max/min/product reduction gets a fold instead
+# of an opaque output and can be proved equal by body. Additivity, operand swap,
+# and scale lifting stay restricted to "add" (``register_fold_family`` and
+# ``_lift_scale_through_fold`` already guard on ``combine_op``).
+REDUCE1_MAX_FAM = register_fold_family(
+    "REDUCE1_MAX",
+    outer_arity=1,
+    kind=ReductionKind.REDUCE,
+    combine_op="max",
+    takes_extent=True,
+)
+REDUCE1_MIN_FAM = register_fold_family(
+    "REDUCE1_MIN",
+    outer_arity=1,
+    kind=ReductionKind.REDUCE,
+    combine_op="min",
+    takes_extent=True,
+)
+REDUCE1_MUL_FAM = register_fold_family(
+    "REDUCE1_MUL",
+    outer_arity=1,
+    kind=ReductionKind.REDUCE,
+    combine_op="mul",
+    takes_extent=True,
+)
 
 
 def fold_family(
@@ -740,8 +766,19 @@ def _broadcast_indices(
         mapped_pos = src_to_out[src_pos]
         if mapped_pos is None or _arith_equal(src_dim, 1):
             out.append(z3.IntVal(0))
+            continue
+        index = aligned_indices[mapped_pos]
+        out_dim = out_shape.dims[mapped_pos]
+        if z3.is_int_value(src_dim) or _arith_equal(src_dim, out_dim):
+            # A literal non-one dim, or the output's own dim, never broadcasts.
+            out.append(index)
         else:
-            out.append(aligned_indices[mapped_pos])
+            # A symbolic dim may be 1 at runtime. Clamp the read here, the way
+            # TensorRight composes accesses, instead of asserting a global
+            # "dim == 1 implies fn(i) == fn(0)" axiom on every node: that axiom
+            # contradicts any definition whose value depends on an index outside
+            # the tensor (iota, affine_select), which made the context unsat.
+            out.append(z3.If(src_dim == 1, z3.IntVal(0), index))
     return out
 
 
@@ -796,6 +833,18 @@ def _apply_binary(op: Any, lhs: z3.ArithRef, rhs: z3.ArithRef) -> z3.ArithRef:
     if opn in ("greater_equal",):
         return z3.If(lhs >= rhs, z3.RealVal(1), z3.RealVal(0))
     if opn in ("power",):
+        exponent = z3.simplify(rhs)
+        if z3.is_rational_value(exponent):
+            value = exponent.as_fraction()
+            if value == 1:
+                return lhs
+            if value == 2:
+                return lhs * lhs
+            if value == 0.5:
+                sqrt_value, _ = _apply_activation("sqrt", lhs)
+                return sqrt_value
+            if value == -1:
+                return _safe_divide(z3.RealVal(1), lhs)
         return _POW_FN(lhs, rhs)
     key = str(opn)
     with _UF_LOCK:
@@ -810,7 +859,24 @@ def _apply_binary(op: Any, lhs: z3.ArithRef, rhs: z3.ArithRef) -> z3.ArithRef:
     return fn(lhs, rhs)
 
 
+def _unary_uf(key: str) -> z3.FuncDeclRef:
+    """The shared uninterpreted function for one named elementwise op."""
+    with _UF_LOCK:
+        if key not in _UNARY_UFS:
+            _UNARY_UFS[key] = z3.Function(
+                f"NKI_UN_{len(_UNARY_UFS)}", z3.RealSort(), z3.RealSort()
+            )
+        return _UNARY_UFS[key]
+
+
 def _apply_activation(op: Any, x: z3.ArithRef) -> tuple[z3.ArithRef, list[z3.BoolRef]]:
+    """Value of one elementwise activation plus facts about that value.
+
+    Functions with no closed form stay uninterpreted, but ops that are
+    compositions of others are defined through them, so two spellings of the
+    same function meet at the same term: ``silu(x) = x * sigmoid(x)`` and
+    ``rsqrt(x) = reciprocal(sqrt(x))``. The returned facts are quantifier-free
+    and mention only ``x``; the caller closes them over its index variables."""
     opn = _operand_to_expr(op)
     if opn in ("copy", "identity", None):
         return x, []
@@ -823,14 +889,23 @@ def _apply_activation(op: Any, x: z3.ArithRef) -> tuple[z3.ArithRef, list[z3.Boo
         return z3.If(x == 0, z3.RealVal(0), z3.RealVal(1) / x), []
     if opn in ("square",):
         return x * x, []
-    key = str(opn)
-    with _UF_LOCK:
-        if key not in _UNARY_UFS:
-            _UNARY_UFS[key] = z3.Function(
-                f"NKI_UN_{len(_UNARY_UFS)}", z3.RealSort(), z3.RealSort()
-            )
-        fn = _UNARY_UFS[key]
-    return fn(x), []
+    if opn in ("negative", "neg"):
+        return -x, []
+    if opn in ("abs",):
+        return z3.If(x >= 0, x, -x), []
+    if opn in ("sqrt",):
+        y = _unary_uf("sqrt")(x)
+        return y, [y >= 0, z3.Implies(x >= 0, y * y == x), z3.Implies(x == 0, y == 0)]
+    if opn in ("rsqrt",):
+        root, facts = _apply_activation("sqrt", x)
+        return z3.If(root == 0, z3.RealVal(0), z3.RealVal(1) / root), facts
+    if opn in ("sigmoid",):
+        y = _unary_uf("sigmoid")(x)
+        return y, [y > 0, y < 1]
+    if opn in ("silu",):
+        sig, facts = _apply_activation("sigmoid", x)
+        return x * sig, facts
+    return _unary_uf(str(opn))(x), []
 
 
 def singleton_dimension_extensionality(sem: Semantics) -> Context:
@@ -875,6 +950,79 @@ def reduction_additivity_context() -> Context:
     ctx = Context()
     ctx.extend(list(_FOLD_ADDITIVITY_FACTS))
     return ctx
+
+
+def _decl_names(formulas: Iterable[z3.ExprRef]) -> set[str]:
+    """Names of every function symbol applied anywhere in ``formulas``."""
+    names: set[str] = set()
+    seen: set[int] = set()
+    stack = list(formulas)
+    while stack:
+        node = stack.pop()
+        key = node.get_id()
+        if key in seen:
+            continue
+        seen.add(key)
+        if z3.is_app(node):
+            names.add(node.decl().name())
+            stack.extend(node.children())
+        elif z3.is_quantifier(node):
+            stack.append(node.body())
+    return names
+
+
+def _relevant_facts(facts: list[z3.BoolRef], mentioned: set[str]) -> list[z3.BoolRef]:
+    """Keep the lemmas whose fold or function symbols occur in the goal.
+
+    A lemma about a symbol the goal never mentions cannot contribute to a proof;
+    it only adds quantifiers for Z3 to instantiate. Every registered family's
+    axioms used to ride along on every value query."""
+    kept: list[z3.BoolRef] = []
+    for fact in facts:
+        owners = {
+            name
+            for name in _decl_names([fact])
+            if name.startswith(("FOLD_", "NKI_EXP", "NKI_POW"))
+        }
+        # A lemma with no recognised owner symbol is kept: filtering is only
+        # an optimisation and must never drop something it cannot classify.
+        if not owners or owners & mentioned:
+            kept.append(fact)
+    return kept
+
+
+# Exponential algebra. ``exp`` is an uninterpreted function, so without these
+# lemmas ``exp(a + b)`` and ``exp(a) * exp(b)`` are unrelated terms and the
+# softmax / online-softmax rescaling rewrites can never be admitted. Each lemma
+# has an explicit trigger on the ``exp`` of a sum or difference, so instantiation
+# only fires on terms the goal already contains and cannot loop.
+def _make_exp_algebra_facts() -> list[z3.BoolRef]:
+    a, b = z3.Reals("_exp_alg_a _exp_alg_b")
+    add_rule = z3.ForAll(
+        [a, b],
+        _EXP_FN(a + b) == _EXP_FN(a) * _EXP_FN(b),
+        patterns=[_EXP_FN(a + b)],
+    )
+    sub_rule = z3.ForAll(
+        [a, b],
+        _EXP_FN(a - b) * _EXP_FN(b) == _EXP_FN(a),
+        patterns=[_EXP_FN(a - b)],
+    )
+    positive = z3.ForAll([a], _EXP_FN(a) > 0, patterns=[_EXP_FN(a)])
+    return [add_rule, sub_rule, positive, _EXP_FN(z3.RealVal(0)) == 1]
+
+
+_EXP_ALGEBRA_FACTS: list[z3.BoolRef] = _make_exp_algebra_facts()
+
+
+def elementwise_algebra_context(mentioned: set[str] | None = None) -> Context:
+    """Lemmas for interpreted-but-uninterpreted elementwise functions.
+
+    Pass the symbol names the goal mentions to keep only the relevant lemmas."""
+    facts = list(_EXP_ALGEBRA_FACTS)
+    if mentioned is not None:
+        facts = _relevant_facts(facts, mentioned)
+    return Context(facts)
 
 
 # Goals at or above this many AST nodes go to Z3's tuned tactic instead of the
@@ -1085,7 +1233,12 @@ def compile_expr(expr: SymExpr, cache: dict[int, Semantics]) -> Semantics:
         raise KeyError(f"No semantics registered for op '{expr.op}'")
     shape_res = entry.shape_rule(input_shapes, expr.attrs)
     sem = entry.compile_rule(expr, compiled_inputs, shape_res.out)
-    sem.ctx = sem.ctx.merged(singleton_dimension_extensionality(sem))
+    # No singleton axiom here. Broadcast reads clamp their own index
+    # (``_broadcast_indices``), so a derived tensor needs no extra fact, and the
+    # axiom is unsound for a definition that depends on its raw index: with a
+    # size-1 axis it forced ``iota(i, j) == iota(i, 0)`` for every ``j``, a
+    # contradiction that let any candidate "prove" equal. Inputs keep the axiom
+    # because they are unconstrained functions, so it cannot conflict.
     validity = Context()
     for compiled in compiled_inputs:
         validity.extend(compiled.validity.facts)
@@ -1589,15 +1742,32 @@ def _check_value_equivalent_after_shape(
     lsem, rsem = _compile_pair_for_equivalence(current, candidate)
     assumptions = Context([p.constraint for p in (preconditions or [])])
     semantic_ctx = lsem.validity.merged(assumptions, lsem.ctx, rsem.ctx)
-    fallback_ctx = semantic_ctx.merged(reduction_extensionality_context())
+    # Only lemmas about symbols the goal mentions: an unused family's axioms
+    # cannot help, they only give the solver more quantifiers to instantiate.
+    mentioned = _decl_names(semantic_ctx.facts)
+    fallback_ctx = semantic_ctx.merged(
+        Context(_relevant_facts(reduction_extensionality_context().facts, mentioned))
+    )
     value_ctx = fallback_ctx.merged(
-        reduction_additivity_context(), reduction_swap_context()
+        Context(_relevant_facts(reduction_additivity_context().facts, mentioned)),
+        Context(_relevant_facts(reduction_swap_context().facts, mentioned)),
+        elementwise_algebra_context(mentioned),
     )
     shape_eq = _shape_eq(lsem.shape, rsem.shape)
     if _indexed_exprs_equivalent(current.expr, candidate.expr):
         return EquivalenceVerdict(
             proved=True, stage="proved", used_reduction_fallback=True
         )
+    evaluation = _evaluation_verdict(
+        current,
+        candidate,
+        [*lsem.validity.facts, *assumptions.facts, shape_eq],
+        lsem.shape,
+        deadline,
+        timeout,
+    )
+    if evaluation is not None:
+        return evaluation
     value_assertions = [value_ctx.as_formula(), shape_eq]
     if lsem.shape.rank == 0:
         value_assertions.append(lsem.fn() != rsem.fn())
@@ -1632,6 +1802,49 @@ def _check_value_equivalent_after_shape(
             proved=True, stage="proved", used_reduction_fallback=True
         )
     return EquivalenceVerdict(proved=False, stage="value", detail=str(value_res))
+
+
+# Share of a value proof's budget for the quantifier-free evaluation attempt.
+# Its queries are small and usually decide in a few milliseconds; the cap keeps
+# a hard evaluation query from starving the quantified encoding behind it.
+_EVALUATION_BUDGET_FRACTION = 3
+SYMBOLIC_EVALUATION_ENABLED = os.environ.get("AXON_SYMBOLIC_EVAL", "1") != "0"
+
+
+def _evaluation_verdict(
+    current: SymTensor,
+    candidate: SymTensor,
+    assumptions: list[z3.BoolRef],
+    out_shape: ShapeExpr,
+    deadline: float,
+    timeout: int,
+) -> EquivalenceVerdict | None:
+    """Try the TensorRight-style symbolic-evaluation proof first.
+
+    Returns a verdict when evaluation decides the obligation, else None so the
+    quantified encoding runs. A refutation is only reported when evaluation
+    abstracted nothing, so it is a counterexample in the same semantics."""
+    if not SYMBOLIC_EVALUATION_ENABLED:
+        return None
+    from axon.symbolic_eval import Outcome, prove_by_evaluation
+
+    remaining = _remaining_timeout(deadline, timeout)
+    if remaining is None:
+        return None
+    budget = max(1, remaining // _EVALUATION_BUDGET_FRACTION)
+    result = prove_by_evaluation(
+        current.expr, candidate.expr, assumptions, out_shape, budget
+    )
+    if result.outcome is Outcome.PROVED:
+        return EquivalenceVerdict(
+            proved=True,
+            stage="proved",
+            detail=f"symbolic_evaluation: {result.detail}",
+        )
+    if result.outcome is Outcome.REFUTED:
+        # Same detail the quantified query reports for a counterexample.
+        return EquivalenceVerdict(proved=False, stage="value", detail="sat")
+    return None
 
 
 def _fallback_timeout(timeout: int) -> int:
@@ -2206,22 +2419,47 @@ def dma_copy(
     )
 
 
+_DMA_TRANSPOSE_DEFAULT_AXES: dict[int, tuple[int, ...]] = {
+    2: (1, 0),
+    3: (2, 1, 0),
+    4: (3, 1, 2, 0),
+}
+
+
+def _dma_transpose_axes(axes_attr: Any, rank: int) -> tuple[int, ...] | None:
+    """The permutation a ``dma_transpose`` applies, or None when it is invalid.
+
+    TensorRight's ``transpose`` asserts that its map is a permutation before it
+    relabels anything. Mirror that: an ``axes`` that is not a permutation of
+    ``range(rank)`` used to reach ``_permute_dims`` and either crash or read the
+    wrong axis."""
+    if axes_attr is None:
+        return _DMA_TRANSPOSE_DEFAULT_AXES.get(rank)
+    try:
+        axes = tuple(int(a) for a in axes_attr)
+    except (TypeError, ValueError):
+        return None
+    if len(axes) != rank or sorted(axes) != list(range(rank)):
+        return None
+    return axes
+
+
 def _shape_dma_transpose(ins: list[ShapeExpr], attrs: dict[str, Any]) -> ShapeResult:
     src_shape = ins[0]
-    axes_attr = attrs.get("axes")
-    axes_list = (
-        list(axes_attr)
-        if axes_attr is not None
-        else (
-            [1, 0]
-            if src_shape.rank == 2
-            else [2, 1, 0]
-            if src_shape.rank == 3
-            else [3, 1, 2, 0]
-        )
-    )
-    dims = _permute_dims(list(src_shape.dims), axes_list)
+    axes = _dma_transpose_axes(attrs.get("axes"), src_shape.rank)
+    if axes is None:
+        ctx = _shape_ctx(*src_shape.dims)
+        ctx.add(z3.BoolVal(False))
+        return ShapeResult(ShapeExpr(list(src_shape.dims)), ctx)
+    dims = _permute_dims(list(src_shape.dims), list(axes))
     return ShapeResult(ShapeExpr(dims), _shape_ctx(*src_shape.dims, *dims))
+
+
+def _validity_dma_transpose(ins: list[ShapeExpr], attrs: dict[str, Any]) -> Context:
+    ctx = Context()
+    if not ins or _dma_transpose_axes(attrs.get("axes"), ins[0].rank) is None:
+        ctx.add(z3.BoolVal(False))
+    return ctx
 
 
 def _compile_dma_transpose(
@@ -2229,23 +2467,32 @@ def _compile_dma_transpose(
 ) -> Semantics:
     src_sem = ins[0]
     out_fn = _tensor_function(f"V_{expr.name}", out_shape.rank)
-    idx = _index_vars(expr.name, out_shape.rank)
-    axes_attr = expr.attrs.get("axes")
-    axes_list = (
-        list(axes_attr)
-        if axes_attr is not None
-        else (
-            [1, 0]
-            if out_shape.rank == 2
-            else [2, 1, 0]
-            if out_shape.rank == 3
-            else [3, 1, 2, 0]
-        )
-    )
-    src_idx = [idx[axes_list.index(axis)] for axis in range(len(axes_list))]
     ctx = src_sem.ctx.merged()
+    axes = _dma_transpose_axes(expr.attrs.get("axes"), src_sem.shape.rank)
+    if axes is None or len(axes) != out_shape.rank:
+        # Invalid permutation: validity is unsatisfiable, so leave it opaque.
+        return Semantics(expr.name, out_shape, out_fn, ctx)
+    idx = _index_vars(expr.name, out_shape.rank)
+    src_idx = [idx[axes.index(axis)] for axis in range(len(axes))]
     ctx.add(z3.ForAll(idx, out_fn(*idx) == src_sem.fn(*src_idx)))
-    return Semantics(expr.name, out_shape, out_fn, ctx)
+    reduction = None
+    if axes == (1, 0):
+        reduction = _lift_fold_through_transpose(
+            expr.name, src_sem.reduction, out_fn, out_shape, ctx
+        )
+    return Semantics(expr.name, out_shape, out_fn, ctx, reduction=reduction)
+
+
+def _builder_out_shape(dst: Any, src: SymTensor, permuted: tuple[Any, ...]) -> Any:
+    """Output shape for a shape-changing builder.
+
+    A ``dst`` tile already has the output's shape, so it is used as is. The
+    transpose builders used to permute ``dst.shape`` a second time, which gave
+    the untransposed shape whenever a caller passed a real destination."""
+    if isinstance(dst, SymTensor):
+        return dst.shape
+    del src
+    return permuted
 
 
 @semantics_hw()
@@ -2254,15 +2501,10 @@ def dma_transpose(
 ):
     assert _is_sym_tensor(src)
     resolved_axes = tuple(axes) if axes is not None else None
-    out_shape = _default_out_shape(dst, src)
-    if resolved_axes is not None:
-        out_shape = tuple(out_shape[a] for a in resolved_axes)
-    elif len(out_shape) == 2:
-        out_shape = (out_shape[1], out_shape[0])
-    elif len(out_shape) == 3:
-        out_shape = (out_shape[2], out_shape[1], out_shape[0])
-    elif len(out_shape) == 4:
-        out_shape = (out_shape[3], out_shape[1], out_shape[2], out_shape[0])
+    perm = _dma_transpose_axes(resolved_axes, len(src.shape))
+    permuted = (
+        tuple(src.shape[a] for a in perm) if perm is not None else tuple(src.shape)
+    )
     return _new_sym_tensor(
         "dma_transpose",
         [src],
@@ -2272,7 +2514,7 @@ def dma_transpose(
             "oob_mode": oob_mode,
             "name": name,
         },
-        out_shape,
+        _builder_out_shape(dst, src, permuted),
     )
 
 
@@ -2556,6 +2798,11 @@ def _compile_nc_matmul(
         stationary_sem.shape.rank == 2
         and moving_sem.shape.rank == 2
         and out_shape.rank == 2
+        # ``is_transpose`` switches the Tensor Engine into its transpose mode,
+        # which is not the sum of products below. Leave it opaque rather than
+        # let it prove equal to an ordinary matmul. The one-zero and perf-mode
+        # flags are hints that do not change the value.
+        and expr.attrs.get("is_transpose", False) is not True
     ):
         m = z3.Int(f"{expr.name}_m")
         n = z3.Int(f"{expr.name}_n")
@@ -2737,11 +2984,14 @@ def nc_stream_shuffle(dst, src, shuffle_mask, name=None):
 @semantics_hw()
 def nc_transpose(dst, data, engine=engine.unknown, name=None):
     assert _is_sym_tensor(data)
-    out_shape = _default_out_shape(dst, data)
-    if len(out_shape) >= 2:
-        out_shape = (out_shape[1], out_shape[0], *out_shape[2:])
+    permuted = tuple(data.shape)
+    if len(permuted) >= 2:
+        permuted = (permuted[1], permuted[0], *permuted[2:])
     return _new_sym_tensor(
-        "nc_transpose", [data], {"engine": engine, "name": name}, out_shape
+        "nc_transpose",
+        [data],
+        {"engine": engine, "name": name},
+        _builder_out_shape(dst, data, permuted),
     )
 
 
@@ -3683,41 +3933,66 @@ def _compile_nc_transpose(
         out_idx = [i, j, *rest]
         src_idx = [j, i, *rest]
         ctx.add(z3.ForAll(out_idx, out_fn(*out_idx) == a.fn(*src_idx)))
-    if (
-        out_shape.rank == 2
-        and a.reduction is not None
-        and a.reduction.outer_rank == 2
-        and a.reduction.output_transform == "identity"
-        and a.reduction.outer_dims is not None
-    ):
-        fam = fold_family(2, a.reduction.kind, a.reduction.combine_op)
-        if fam is not None and fam.fold_takes_extent:
-            body_id = _BODY_IDS.next()
-            k = z3.Int(f"{expr.name}_rk")
-            source_body = z3.IntVal(a.reduction.body_id)
-            target_body = z3.IntVal(body_id)
-            ctx.add(
-                z3.ForAll(
-                    [i, j, k],
-                    fam.step(target_body, i, j, k) == fam.step(source_body, j, i, k),
-                )
-            )
-            ctx.add(
-                z3.ForAll(
-                    [i, j],
-                    out_fn(i, j) == fam.fold(target_body, i, j, a.reduction.extent),
-                )
-            )
-            reduction = ReductionDesc(
-                body_id,
-                a.reduction.extent,
-                outer_rank=fam.outer_arity,
-                kind=fam.kind,
-                combine_op=fam.combine_op,
-                outer_dims=tuple(out_shape.dims),
-                output_transform="identity",
-            )
+    if out_shape.rank == 2:
+        reduction = _lift_fold_through_transpose(
+            expr.name, a.reduction, out_fn, out_shape, ctx
+        )
     return Semantics(expr.name, out_shape, out_fn, ctx, reduction=reduction)
+
+
+def _lift_fold_through_transpose(
+    name: str,
+    reduction: ReductionDesc | None,
+    out_fn: z3.FuncDeclRef,
+    out_shape: ShapeExpr,
+    ctx: Context,
+) -> ReductionDesc | None:
+    """Carry a rank-2 fold descriptor through a 2-D transpose.
+
+    TensorRight gets this for free, because a transpose only renames the index
+    before the inner access. Here a fold is an opaque term, so each transpose
+    must restate it: the new step reads the old step with the outer indices
+    swapped. Every transpose-like op must go through this helper; before it,
+    only ``nc_transpose`` did, so ``dma_transpose(matmul(...))`` lost its
+    descriptor and fell back to quantifier instantiation."""
+    if (
+        reduction is None
+        or reduction.outer_rank != 2
+        or reduction.output_transform != "identity"
+        or reduction.outer_dims is None
+        or out_shape.rank != 2
+    ):
+        return None
+    fam = fold_family(2, reduction.kind, reduction.combine_op)
+    if fam is None or not fam.fold_takes_extent:
+        return None
+    i = z3.Int(f"{name}_ti")
+    j = z3.Int(f"{name}_tj")
+    k = z3.Int(f"{name}_rk")
+    body_id = _BODY_IDS.next()
+    source_body = z3.IntVal(reduction.body_id)
+    target_body = z3.IntVal(body_id)
+    ctx.add(
+        z3.ForAll(
+            [i, j, k],
+            fam.step(target_body, i, j, k) == fam.step(source_body, j, i, k),
+        )
+    )
+    ctx.add(
+        z3.ForAll(
+            [i, j],
+            out_fn(i, j) == fam.fold(target_body, i, j, reduction.extent),
+        )
+    )
+    return ReductionDesc(
+        body_id,
+        reduction.extent,
+        outer_rank=fam.outer_arity,
+        kind=fam.kind,
+        combine_op=fam.combine_op,
+        outer_dims=tuple(out_shape.dims),
+        output_transform="identity",
+    )
 
 
 def _normalize_reduce_axis(axis_attr: Any, rank: int) -> Any:
@@ -3750,6 +4025,22 @@ def _shape_tensor_reduce(ins: list[ShapeExpr], attrs: dict[str, Any]) -> ShapeRe
 def _compile_tensor_reduce(
     expr: SymExpr, ins: list[Semantics], out_shape: ShapeExpr
 ) -> Semantics:
+    return compile_rank2_fold_reduce(
+        expr, ins, out_shape, _normalize_combine_op(expr.attrs.get("op"))
+    )
+
+
+def compile_rank2_fold_reduce(
+    expr: SymExpr,
+    ins: list[Semantics],
+    out_shape: ShapeExpr,
+    combine_op: str,
+) -> Semantics:
+    """Fold semantics for a single-axis reduction of a rank-2 tensor.
+
+    Shared by ``tensor_reduce``, the graph ``reduce_sum``, and the public
+    ``sum``/``max``/``min``/``prod`` reductions, so a public reduction and its
+    ISA lowering produce the same fold family and can be proved equal by body."""
     a = ins[0]
     out_fn = _tensor_function(f"V_{expr.name}", out_shape.rank)
     ctx = a.ctx.merged()
@@ -3762,7 +4053,6 @@ def _compile_tensor_reduce(
     i = z3.Int(f"{expr.name}_i")
     j = z3.Int(f"{expr.name}_j")
     k = z3.Int(f"{expr.name}_k")
-    combine_op = _normalize_combine_op(expr.attrs.get("op"))
     fam = fold_family(1, ReductionKind.REDUCE, combine_op)
     if fam is None:
         # No registered family for this combine op — leave output opaque.
@@ -4115,7 +4405,10 @@ def _compile_public_unary(
     value, facts = _apply_activation(
         expr.attrs.get("op", expr.op), _call_broadcasted(a, out_shape, idx)
     )
-    ctx.extend(facts)
+    # Close each fact over the index variables. A bare fact asserted the value
+    # fact only at one arbitrary index, which no proof could use.
+    for fact in facts:
+        ctx.add(z3.ForAll(idx, fact) if idx else fact)
     ctx.add(z3.ForAll(idx, out_fn(*idx) == value))
     return Semantics(expr.name, out_shape, out_fn, ctx)
 
@@ -4198,7 +4491,12 @@ def register_hw_semantics() -> None:
         "activation_reduce", _shape_activation_reduce, _compile_activation_reduce
     )
     _ensure_semantics("dma_copy", _shape_same_as_first, _compile_copy)
-    _ensure_semantics("dma_transpose", _shape_dma_transpose, _compile_dma_transpose)
+    _ensure_semantics(
+        "dma_transpose",
+        _shape_dma_transpose,
+        _compile_dma_transpose,
+        _validity_dma_transpose,
+    )
     _ensure_semantics("exponential", _shape_activation, _compile_exponential)
     _ensure_semantics(
         "nc_matmul", _shape_nc_matmul, _compile_nc_matmul, _validity_nc_matmul

@@ -42,6 +42,7 @@ from axon.egraph.proof_parallel import (
     LocalProofObligation,
     run_local_proof_batch,
 )
+from axon.egraph.rewrite_trace import record_lowering
 from axon.egraph.workers import resolve_worker_count
 from axon.ir import _sym_expr_from_graph_node
 from axon.isa_semantics import (
@@ -406,9 +407,11 @@ def admit_lowering(
     """Add a proved sketch to the realization of ``tensor_class``."""
     root = add_program(isa_adapter, sketch, L, formal_to_class)
     if tensor_class in L:
-        isa_adapter.union_if_distinct(root, L[tensor_class])
+        if isa_adapter.union_if_distinct(root, L[tensor_class]):
+            record_lowering("lowering", tensor_class, sketch)
     else:
         L[tensor_class] = root
+        record_lowering("lowering", tensor_class, sketch)
     return root
 
 

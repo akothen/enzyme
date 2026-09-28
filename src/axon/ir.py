@@ -446,6 +446,19 @@ def annotate_shapes_concrete(G: nuGraph) -> nuGraph:
             shape_res = entry.shape_rule(
                 [_shape_expr_from_dims(shapes[inp]) for inp in n.inputs], dict(n.attrs)
             )
+            input_shapes = [_shape_expr_from_dims(shapes[inp]) for inp in n.inputs]
+            facts = [
+                *shape_res.ctx.facts,
+                *entry.validity_rule(input_shapes, dict(n.attrs)).facts,
+            ]
+            # A shape rule reports an impossible application (bad rank, bad
+            # permutation) as a false validity fact rather than by raising.
+            # With concrete dims those facts simplify, so check them here.
+            for fact in facts:
+                if z3.is_false(z3.simplify(fact)):
+                    raise ValueError(
+                        f"node '{n.id}' ({n.op}) is invalid at concrete shape: {fact}"
+                    )
             shape = tuple(_normalize_dim(d) for d in shape_res.out.dims)
         n.shape = shape
         shapes[n.id] = shape

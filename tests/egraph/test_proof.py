@@ -1989,6 +1989,9 @@ def test_reduction_fallback_remains_available_after_abstract_sat_or_unknown(
 
     monkeypatch.setattr(isa, "_check_deterministic", abstract_check)
     monkeypatch.setattr(isa, "_check_reduction_equivalent_by_body", fallback)
+    # This pins the quantified query -> body fallback order. Symbolic evaluation
+    # runs before both and would prove the identical copies on its own.
+    monkeypatch.setattr(isa, "SYMBOLIC_EVALUATION_ENABLED", False)
 
     proved_current, proved_candidate = isa._with_proved_shape(
         current, candidate, "fallback-test"

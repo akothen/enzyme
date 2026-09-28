@@ -7,6 +7,9 @@ import z3
 
 from axon.isa_semantics import (
     _BODY_IDS,
+    _EXP_FN,
+    REDUCE1_FAM,
+    REDUCE1_MAX_FAM,
     REDUCE2_FAM,
     SCAN2_FAM,
     Context,
@@ -37,6 +40,7 @@ from axon.isa_semantics import (
     _public_store,
     _public_transpose_out_shape,
     _public_unary,
+    _safe_divide,
     _shape_ctx,
     _shape_from_out,
     _shape_public_attr_or_first,
@@ -45,6 +49,7 @@ from axon.isa_semantics import (
     _shape_same_as_first,
     _tensor_function,
     activation,
+    compile_rank2_fold_reduce,
     dma_copy,
     dma_transpose,
     nc_matmul,
@@ -498,10 +503,51 @@ def _shape_graph_reduce_sum(ins: list[ShapeExpr], attrs: dict[str, Any]) -> Shap
     )
 
 
+_PUBLIC_REDUCE_COMBINE = {"sum": "add", "max": "max", "min": "min", "prod": "mul"}
+
+
+def public_reduce_single_axis(expr: SymExpr, rank: int) -> int | None:
+    """The one normalized axis a public reduction folds, when it folds one."""
+    axis_attr = expr.attrs.get("axis")
+    if isinstance(axis_attr, (list, tuple)):
+        if len(axis_attr) != 1:
+            return None
+        axis_attr = axis_attr[0]
+    if not isinstance(axis_attr, int) or isinstance(axis_attr, bool):
+        return None
+    axis = axis_attr + rank if axis_attr < 0 else axis_attr
+    return axis if 0 <= axis < rank else None
+
+
 def _compile_public_reduce(
     expr: SymExpr, ins: list[Semantics], out_shape: ShapeExpr
 ) -> Semantics:
+    """Fold semantics for single-axis rank-2 public reductions.
+
+    ``sum``/``max``/``min``/``prod`` used to compile to an opaque function of the
+    output index alone, so ``nl.sum(x, axis=1)`` could never be proved equal to
+    its own ``tensor_reduce`` lowering. They now share the ISA fold families;
+    ``mean`` is the sum divided by the reduced extent. Other shapes and ops
+    (``var``, ``all``, multi-axis) stay opaque."""
     a = ins[0]
+    axis = public_reduce_single_axis(expr, a.shape.rank)
+    if a.shape.rank == 2 and axis is not None:
+        combine = _PUBLIC_REDUCE_COMBINE.get(expr.op)
+        if combine is not None:
+            return compile_rank2_fold_reduce(expr, ins, out_shape, combine)
+        if expr.op == "mean":
+            sum_expr = SymExpr(
+                "sum", expr.inputs, expr.shape, dict(expr.attrs), f"{expr.name}_sum"
+            )
+            total = compile_rank2_fold_reduce(sum_expr, ins, out_shape, "add")
+            out_fn = _tensor_function(f"V_{expr.name}", out_shape.rank)
+            idx = _index_vars(expr.name, out_shape.rank)
+            extent = z3.ToReal(a.shape.dims[axis])
+            ctx = total.ctx.merged()
+            ctx.add(
+                z3.ForAll(idx, out_fn(*idx) == _safe_divide(total.fn(*idx), extent))
+            )
+            return Semantics(expr.name, out_shape, out_fn, ctx)
     out_fn = _tensor_function(f"V_{expr.name}", out_shape.rank)
     idx = _index_vars(expr.name, out_shape.rank)
     ctx = a.ctx.merged()
@@ -512,6 +558,52 @@ def _compile_public_reduce(
     )
     index_args = idx if idx else [z3.IntVal(0)]
     ctx.add(z3.ForAll(idx, out_fn(*idx) == opaque(*index_args)))
+    return Semantics(expr.name, out_shape, out_fn, ctx)
+
+
+def public_softmax_axis_ok(expr: SymExpr, rank: int) -> bool:
+    axis = expr.attrs.get("axis", -1)
+    if not isinstance(axis, int) or isinstance(axis, bool):
+        return False
+    return rank == 2 and (axis + rank if axis < 0 else axis) == rank - 1
+
+
+def _compile_public_softmax(
+    expr: SymExpr, ins: list[Semantics], out_shape: ShapeExpr
+) -> Semantics:
+    """Row softmax: ``exp(x - max_row) / sum_row(exp(x - max_row))``.
+
+    Softmax used to be compiled as an elementwise uninterpreted function of one
+    element, which claims it commutes with any index permutation: the checker
+    proved ``transpose(softmax(x)) == softmax(transpose(x))``. It is now defined
+    through a max fold and a sum fold over the last axis, the two reductions its
+    ISA lowering performs. Other ranks and axes get a per-node opaque function of
+    the whole input, which proves nothing about them."""
+    a = ins[0]
+    if out_shape.rank != 2 or not public_softmax_axis_ok(expr, a.shape.rank):
+        return _compile_public_opaque(expr, ins, out_shape)
+    out_fn = _tensor_function(f"V_{expr.name}", out_shape.rank)
+    ctx = a.ctx.merged()
+    i = z3.Int(f"{expr.name}_si")
+    j = z3.Int(f"{expr.name}_sj")
+    k = z3.Int(f"{expr.name}_sk")
+    n = a.shape.dims[1]
+    max_body = _BODY_IDS.next()
+    ctx.add(
+        z3.ForAll([i, k], REDUCE1_MAX_FAM.step(z3.IntVal(max_body), i, k) == a.fn(i, k))
+    )
+    row_max = REDUCE1_MAX_FAM.fold(z3.IntVal(max_body), i, n)
+
+    def shifted_exp(col: z3.ArithRef) -> z3.ArithRef:
+        return _EXP_FN(a.fn(i, col) - row_max)
+
+    sum_body = _BODY_IDS.next()
+    ctx.add(
+        z3.ForAll([i, k], REDUCE1_FAM.step(z3.IntVal(sum_body), i, k) == shifted_exp(k))
+    )
+    ctx.add(z3.ForAll([i, k], shifted_exp(k) > 0))
+    row_sum = REDUCE1_FAM.fold(z3.IntVal(sum_body), i, n)
+    ctx.add(z3.ForAll([i, j], out_fn(i, j) == _safe_divide(shifted_exp(j), row_sum)))
     return Semantics(expr.name, out_shape, out_fn, ctx)
 
 
@@ -779,7 +871,6 @@ def _register_public_semantics() -> None:
         "silu",
         "silu_dx",
         "sin",
-        "softmax",
         "softplus",
         "sqrt",
         "square",
@@ -842,6 +933,7 @@ def _register_public_semantics() -> None:
     _ensure_semantics(
         "cumsum", _shape_public_cumsum, _compile_public_cumsum, _validity_public_cumsum
     )
+    _ensure_semantics("softmax", _shape_public_unary, _compile_public_softmax)
     _ensure_semantics("div", _shape_public_binary, _compile_public_binary)
     _ensure_semantics(
         "expand_dims", _shape_public_expand_dims, _compile_public_expand_dims

@@ -23,6 +23,7 @@ from axon.egraph.proof import (
     WallClockExceeded,
     prove_candidate_batch,
 )
+from axon.egraph.rewrite_trace import record_term_rewrite
 from axon.egraph.workers import resolve_worker_count
 from axon.isa_semantics import EquivalenceVerdict
 
@@ -300,6 +301,7 @@ class _ProvedCandidate:
     sequence: tuple[int, int]
     occurrence: Occurrence
     candidate: Candidate
+    stage: str = "propagation"
 
 
 class AdmissionBatch:
@@ -376,9 +378,17 @@ def _admit_propagation_batch(
         roots.append((item, root_handle, consumer_handle))
 
     equalities_added = 0
-    for _item, root_handle, consumer_handle in roots:
+    for item, root_handle, consumer_handle in roots:
         unioned = adapter.union_if_distinct(root_handle, consumer_handle)
         equalities_added += int(unioned)
+        if unioned:
+            record_term_rewrite(
+                item.stage,
+                context,
+                item.occurrence.consumer_class,
+                item.candidate.current,
+                item.candidate.new,
+            )
     after = adapter.freeze_snapshot()
     after_rows = sum(len(rows) for rows in after.classes.values())
     return max(0, after_rows - before_rows), equalities_added
@@ -478,6 +488,7 @@ def run_propagation_round(
                             sequence=sequence,
                             occurrence=occurrence,
                             candidate=candidate,
+                            stage=stage,
                         )
                     )
 
